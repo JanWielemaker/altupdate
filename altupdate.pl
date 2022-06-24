@@ -34,9 +34,12 @@
 
 :- module(altupdate,
           [ alt_create_workers/2, % ++Pool, +Goals
+            alt_add_worker/2,     % ++Pool, :Goal
+            alt_del_workers/2,    % ++Pool, :Goal
             alt_close/1,          % ++Pool
             alt_request/3,        % ++Pool, +Request, -Id
-            alt_wait/4            % ++Pool, +Id, -Request, +Options
+            alt_wait/4,           % ++Pool, +Id, -Request, +Options
+            alt_pool_property/2   % ?Pool, :Property
           ]).
 :- use_module(library(apply)).
 :- use_module(library(increval)).
@@ -47,7 +50,10 @@
 :- use_module(library(error)).
 
 :- meta_predicate
-    alt_create_workers(+, :).
+    alt_create_workers(+, :),
+    alt_add_worker(+, 0),
+    alt_del_workers(+, 0),
+    alt_pool_property(?, :).
 
 /** <module> Concurrent evaluation of alternative strategies
 */
@@ -55,7 +61,8 @@
 :- dynamic
     worker/3,		% Pool, Goal, Thread
     queue/2,            % Pool, Queue
-    done/1.             % Id
+    pending/1,          % Id
+    pending/2.          % Id, Pool
 
 %!  alt_create_workers(+Pool, :Goals)
 %
@@ -66,7 +73,39 @@ alt_create_workers(Pool, M:Goals) :-
     must_be(ground, Pool),
     message_queue_create(Q),
     asserta(queue(Pool, Q)),
-    foldl(alt_create_worker(Pool, M), Goals, 1, _).
+    maplist(alt_create_worker(Pool, M), Goals).
+
+%!  alt_add_worker(+Pool, :Goal) is det.
+%
+%   Dynamically add a new worker to Pool   that will try the alternative
+%   Goal.
+
+alt_add_worker(Pool, Goal) :-
+    must_be(ground, Pool),
+    Goal = _:G,
+    pi_head(PI, G),
+    (   format(atom(Alias), 'alt_~w_~w', [Pool, PI])
+    ;   between(1, 1000, I),
+        format(atom(Alias), 'alt_~w_~w_~d', [Pool, PI, I])
+    ),
+    \+ worker(Pool, _, Alias),
+    !,
+    thread_create(alt_worker(Pool, Goal), TID, [alias(Alias)]),
+    asserta(worker(Pool, Goal, TID)).
+
+%!  alt_del_workers(+Pool, :Goal) is det.
+%
+%   Remove matching workers from Pool.  Note  that   if  a  Goal  is not
+%   applicable from a given request it  is   also  good  if the the Goal
+%   fails or throws an exception.
+
+alt_del_workers(Pool, Goal) :-
+    must_be(ground, Pool),
+    findall(T, worker(Pool, Goal, T), Threads),
+    forall(member(TID, Threads),
+           thread_send_message(TID, quit)),
+    maplist(thread_join, Threads).
+
 
 %!  alt_close(+Pool)
 %
@@ -81,20 +120,13 @@ alt_close(Pool) :-
            thread_join(TID)).
 
 :- meta_predicate
-    alt_create_worker(0, +, +),
     request(0, -),
     run(1, +).
 
-alt_create_worker(Pool, M, Goal, Id, Nid) :-
-    alt_create_worker(M:Goal, Pool, Id),
-    Nid is Id+1.
+alt_create_worker(Pool, M, Goal) :-
+    alt_add_worker(Pool, M:Goal).
 
-alt_create_worker(Goal, Pool, Id) :-
-    Goal = _:G,
-    pi_head(PI, G),
-    format(atom(Alias), 'alt_~d_~w', [Id, PI]),
-    thread_create(alt_worker(Pool, Goal), TID, [alias(Alias)]),
-    asserta(worker(Pool, Goal, TID)).
+
 
 %!  alt_worker(+Pool, :Goal)
 %
@@ -118,9 +150,18 @@ dispatch(Pool, request(Id, Request), Goal) =>
                           altupdate_mutex),
               Exception,
               true)
-    ->  (   var(Exception)
+    ->  (   var(Exception), Changes \== failed
         ->  debug(alt, 'Won!  Committing ~p', [Changes]),
             send_changes(Pool, Me, Id, Request, Changes)
+        ;   var(Exception)
+        ->  debug(alt, 'Lost (too late)', []),
+            thread_send_message(Q, result(Id, Me, lost))
+        ;   Exception = lost_from(_)
+        ->  debug(alt, 'Lost (aborted)', []),
+            thread_send_message(Q, result(Id, Me, lost))
+        ;   Exception = cancelled
+        ->  debug(alt, 'Cancelled', []),
+            thread_send_message(Q, result(Id, Me, cancelled))
         ;   debug(alt, 'Exception: ~p', [Exception]),
             thread_send_message(Q, result(Id, Me, exception(Exception)))
         )
@@ -132,7 +173,9 @@ dispatch(_, updates(_Id, Updates), _Goal) =>
 
 request(Goal, Changes) :-
     call(Goal),
+    !,
     transaction_updates(Changes).
+request(_, failed).
 
 run(Goal, Request) :-
     call(Goal, Request),
@@ -141,10 +184,7 @@ run(_, _) :-
     fail.
 
 only_first(Id) :-
-    (   done(Id)
-    ->  fail
-    ;   asserta(done(Id))
-    ).
+    retract(pending(Id)).
 
 %!  send_changes(+Pool, +Me, +Id, +Request, +Updates) is det.
 %
@@ -199,7 +239,9 @@ alt_request(Pool, Request, _Id) :-
 alt_request(Pool, Request, Id) :-
     flag(alt_request_id, Id, Id+1),
     forall(worker(Pool, _, TID),
-           thread_send_message(TID, request(Id, Request))).
+           thread_send_message(TID, request(Id, Request))),
+    asserta(pending(Id)),
+    asserta(pending(Id, Pool)).
 
 %!  alt_wait(+Pool, +Id, -Request, +Options) is semidet.
 %
@@ -217,32 +259,68 @@ alt_request(Pool, Request, Id) :-
 
 alt_wait(Pool, Id, Request, Options) :-
     must_be(ground, Pool),
+    must_be(ground, Id),
     select_option(timeout(TMO), Options, Options1),
     !,
     get_time(Now),
     Deadline is Now+TMO,
-    findall(T, worker(Pool, _, T), Workers),
-    alt_wait(Pool, Id, Workers, Request, [deadline(Deadline)|Options1]).
+    alt_wait_(Pool, Id, Request,  [deadline(Deadline)|Options1]).
 alt_wait(Pool, Id, Request, Options) :-
-    findall(T, worker(Pool, _, T), Workers),
-    alt_wait(Pool, Id, Workers, Request, Options).
+    alt_wait_(Pool, Id, Request, Options).
 
-alt_wait(_, _, [], _, _) =>
-    fail.
+alt_wait_(Pool, Id, Request, Options), pending(Id, Pool) =>
+    findall(T, worker(Pool, _, T), Workers),
+    alt_wait(Pool, Id, Workers, Request0, Options),
+    Request = Request0.
+alt_wait_(_Pool, Id, _Request, _Options) =>
+    existence_error(query, Id).
+
+
+alt_wait(_, Id, [], Request, _) =>
+    retractall(pending(Id)),
+    retractall(pending(Id, _)),
+    nonvar(Request).
 alt_wait(Pool, Id, Workers, Request, Options) =>
     queue(Pool, Q),
     (   thread_get_message(Q, result(Id, From, Result), Options)
-    ->  (   Result = success(Request0, Updates)
-        ->  updates(Updates),
-            Request = Request0
-        ;   delete(Workers, From, Workers1),
-            alt_wait(Pool, Id, Workers1, Request, Options)
-        )
+    ->  (   Result = success(Request, Updates)
+        ->  updates(Updates)
+        ;   true
+        ),
+        delete(Workers, From, Workers1),
+        alt_wait(Pool, Id, Workers1, Request, Options)
     ;   forall(member(TID, Workers),
                thread_signal(TID, cancelled)),
         alt_wait(Pool, Id, Workers, Request, [])
     ).
 
+
+%!  alt_pool_property(?Pool, :Property) is nondet.
+%
+%   True when Property is a property of Pool.  Defined properties:
+%
+%     - queue(-Queue)
+%       Message queue used for the communication.  Always true
+%     - goal(:Goal)
+%       True when Pool has a worker running Goal.
+%     - pending(Id)
+%       Request Id is pending on Pool.
+
+alt_pool_property(Pool, M:Property) :-
+    queue(Pool, Queue),
+    alt_pool_property_(Property, Pool, Queue, M).
+
+alt_pool_property_(queue(Q), _, Q, _).
+alt_pool_property_(goal(G), Pool, _, M) :-
+    worker(Pool, Goal, _),
+    unqualify(Goal, M, G).
+alt_pool_property_(pending(Id), Pool, _, _) :-
+    pending(Id, Pool).
+
+unqualify(M:Goal, M, G) =>
+    G = Goal.
+unqualify(Goal, _, G) =>
+    G = Goal.
 
 %!  updates(+Updates) is det.
 %
