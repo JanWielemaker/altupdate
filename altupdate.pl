@@ -56,6 +56,26 @@
     alt_pool_property(?, :).
 
 /** <module> Concurrent evaluation of alternative strategies
+
+This library deals with  trying  alternative   strategies  to  satisfy a
+request by changing the state of a   set of dynamic predicates. In other
+words:
+
+  - Give a state represented as a set of dynamic predicates
+  - Given a number of strategies, represented as goals, that can
+    satisfy a request (a term) by updating the state.
+  - Run all these strategies in paralel and accept the first one
+    that succeeds.
+
+In addition, we satisfy the following requirements:
+
+  - The strategies may modify the state during their search.  They
+    do not see each other modifications.  The accepted solution
+    becomes visible _atomically_.
+  - The dynamic predicates can be _incremental_ and be connected
+    using _incremental_ _private_ tables.
+  - Each _worker_ (thread that owns a strategy) maintains consistency
+    with the global view before starting a new request.
 */
 
 :- dynamic
