@@ -1,14 +1,14 @@
 :- module(altupdate,
           [ alt_create_workers/1, % +Goals
             alt_request/2,        % +Request,-Id
-            alt_wait/1            % +Id
+            alt_wait/3            % +Id, -Request, +Options
           ]).
 :- use_module(library(apply)).
 :- use_module(library(increval)).
+:- use_module(library(debug)).
 
 :- meta_predicate
-    alt_create_workers(:),
-    alt_create_worker(0).
+    alt_create_workers(:).
 
 /** <module> Implement concurrent alternative strategies
 */
@@ -26,13 +26,22 @@
 alt_create_workers(M:Goals) :-
     message_queue_create(Q),
     asserta(queue(Q)),
-    maplist(alt_create_worker(M), Goals).
+    foldl(alt_create_worker(M), Goals, 1, _).
 
-alt_create_worker(M, Goal) :-
-    alt_create_worker(M:Goal).
+:- meta_predicate
+    alt_create_worker(0, +),
+    request(0, -),
+    run(1, +).
 
-alt_create_worker(Goal) :-
-    thread_create(alt_worker(Goal), TID, []),
+alt_create_worker(M, Goal, Id, Nid) :-
+    alt_create_worker(M:Goal, Id),
+    Nid is Id+1.
+
+alt_create_worker(Goal, Id) :-
+    Goal = _:G,
+    pi_head(PI, G),
+    format(atom(Alias), 'alt_~d_~w', [Id, PI]),
+    thread_create(alt_worker(Goal), TID, [alias(Alias)]),
     asserta(worker(Goal, TID)).
 
 alt_worker(Goal) :-
@@ -40,25 +49,31 @@ alt_worker(Goal) :-
     dispatch(Msg, Goal),
     alt_worker(Goal).
 
-dispatch(request(Id, Request), Goal) :-
-    (   catch(transaction(request(call(Goal, Request), Changes),
+dispatch(request(Id, Request), Goal) =>
+    (   catch(transaction(request(run(Goal, Request), Changes),
                           only_first(Id),
                           altupdate_mutex),
               Exception,
               true)
     ->  (   var(Exception)
-        ->  send_changes(Id, Changes)
-        ;   true
+        ->  debug(alt, 'Won!  Committing ~p', [Changes]),
+            send_changes(Id, Request, Changes)
+        ;   debug(alt, 'Exception: ~p', [Exception])
         )
-    ;   true
+    ;   debug(alt, 'Failed', [])
     ).
-dispatch(update(_Id, Updates), _Goal) :-
+dispatch(updates(_Id, Updates), _Goal) =>
     maplist(update, Updates).
 
 request(Goal, Changes) :-
     call(Goal),
-    !,
     transaction_updates(Changes).
+
+run(Goal, Request) :-
+    call(Goal, Request),
+    !.
+run(_, _) :-
+    fail.
 
 only_first(Id) :-
     (   done(Id)
@@ -66,7 +81,7 @@ only_first(Id) :-
     ;   asserta(done(Id))
     ).
 
-send_changes(Id, Updates) :-
+send_changes(Id, Request, Updates) :-
     thread_self(Me),
     forall(worker(_, TID),
            (   TID == Me
@@ -75,10 +90,23 @@ send_changes(Id, Updates) :-
                thread_send_message(TID, updates(Id, Updates))
            )),
     queue(Q),
-    thread_send_message(Q, updates(Id, Updates)).
+    thread_send_message(Q, success(Id, Request, Updates)).
 
-lost_from(Me) :-
-    throw(lost_from(Me)).
+lost_from(Winner) :-
+    in_run,
+    !,
+    throw(lost_from(Winner)).
+lost_from(_).
+
+cancelled :-
+    in_run,
+    !,
+    throw(cancelled).
+cancelled.
+
+in_run :-
+    prolog_current_frame(Frame),
+    prolog_frame_attribute(Frame, parent_goal, run(_,_)).
 
 %!  alt_request(+Request, -Id) is det.
 %
@@ -90,13 +118,26 @@ alt_request(Request, Id) :-
     forall(worker(_, TID),
            thread_send_message(TID, request(Id, Request))).
 
-%!  alt_wait(+Id) is det.
+%!  alt_wait(+Id, -Request, +Options) is semidet.
 %
-%   Wait for request Id to be completed
+%   Wait for request Id to be completed. Unify Request with the possibly
+%   instantiated request. Options are   passed  to thread_get_message/3,
+%   where notably timeout(+Seconds) and deadline(+AbdTime) are useful.
 
-alt_wait(Id) :-
+alt_wait(Id, Request, Options) :-
     queue(Q),
-    thread_get_message(Q, updates(Id, Updates)),
+    (   thread_get_message(Q, success(Id, Request, Updates), Options)
+    ->  updates(Updates)
+    ;   forall(worker(_, TID),
+               thread_signal(TID, cancelled)),
+        (   thread_get_message(Q, updates(Id, Updates), [timeout(0.01)])
+        ->  updates(Updates)
+        ;   fail        % timeout
+        )
+    ).
+
+
+updates(Updates) :-
     maplist(update, Updates).
 
 %!  update(+Update) is det.
