@@ -8,23 +8,24 @@ dbg :-
     debug.
 
 init :-
-    alt_create_workers([add, subtract]).
+    alt_create_workers(test, [add, subtract]).
 
 post(N, Id) :-
     ignore(q(_)),
-    alt_request(N, Id).
+    alt_request(test, N, Id).
 
 wait(Id) :-
-    alt_wait(Id, Request, []),
+    alt_wait(test, Id, Request, []),
     writeln(Request).
 
 trip(Val, Action) :-
     trip(Val, Action, []).
+
 trip(Val, Action, Options) :-
     ignore(q(_)),
     Request = i(Val, Action),
-    alt_request(Request, Id),
-    alt_wait(Id, Request, Options),
+    alt_request(test, Request, Id),
+    alt_wait(test, Id, Request, Options),
     forall(q(X), writeln(X)).
 
 :- dynamic p/1 as incremental.

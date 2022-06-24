@@ -13,7 +13,7 @@
     inside a _transaction_ to remain independent.   This works well with private
     incremental tabling.
 
-One simply working solution is to kill the unsuccessful workers. Now we
+One simple working solution is to kill the unsuccessful workers. Now we
 may continue with the winner or we must ensure that committed changes
 are properly reflected in the "main" worker's table.
 
