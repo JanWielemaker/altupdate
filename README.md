@@ -37,3 +37,16 @@ workers. we rather keep them around and update them using one of the
 same strategies as above.
 
 
+## Plan B
+
+  - Attach strategies to the pool
+  - Attach N workers to the pool
+  - alt_request/2 sends a request for each strategy to the pool
+  - The N workers pick a strategy and execute it.
+
+
+## Situation
+
+  - Multiple alrorithms (queries) to try come in one-by-one
+  - Run until one succeeds.
+  - --> need to peek.
