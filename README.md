@@ -50,3 +50,20 @@ same strategies as above.
   - Multiple alrorithms (queries) to try come in one-by-one
   - Run until one succeeds.
   - --> need to peek.
+
+
+## Interface
+
+  - Create a pool with N workers.
+  - Loop
+    - Post goals
+    - Peek status
+      - List of results
+      - List of still running
+
+    - Accept
+
+
+# Remarks
+
+  - thread_wait/3 handles signals slowly.

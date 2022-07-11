@@ -4,28 +4,34 @@ dbg :-
     set_prolog_flag(message_context, [thread,time]),
     debug(alt),
     trace(dispatch/2),
+    trace(alt_peek_/3),
+%   trace(needs_update/2),
     tmon,
     debug.
 
 init :-
-    alt_create_workers(test, [add, subtract]).
+    alt_create_pool(test,
+                    [ threads(4)
+                    ]).
 
-post(N, Id) :-
-    ignore(q(_)),
-    alt_request(test, N, Id).
+post(Goal) :-
+    ignore(q(_)),                       % update table
+    alt_submit(test, Goal).
 
-wait(Id) :-
-    alt_wait(test, Id, Request, []),
-    writeln(Request).
+wait(Goal) :-
+    alt_wait(test, Goal, []).
+
+wait(Goal, Time) :-
+    alt_wait(test, Goal, [timeout(Time)]).
 
 trip(Val, Action) :-
     trip(Val, Action, []).
 
-trip(Val, Action, Options) :-
-    ignore(q(_)),
-    Request = i(Val, Action),
-    alt_request(test, Request, Id),
-    alt_wait(test, Id, Request, Options),
+trip(Val, Goal, Options) :-
+    ignore(q(_)),                      % update table
+    alt_submit(test, add(Val)),
+    alt_submit(test, sub(Val)),
+    alt_wait(test, Goal, Options),
     forall(q(X), writeln(X)).
 
 :- dynamic p/1 as incremental.
@@ -33,7 +39,7 @@ trip(Val, Action, Options) :-
 
 q(X) :- p(X).
 
-add(i(Val, added)) :-
+add(Val) :-
     (   q(X)
     ->  X2 is X+Val
     ;   X2 = Val
@@ -41,9 +47,9 @@ add(i(Val, added)) :-
     asserta(p(X2)),
     ignore(q(_)),
     random_sleep(1),
-    format("Adder: Added ~p~n", [p(X2)]).
+    format("Added ~p~n", [p(X2)]).
 
-subtract(i(Val, substracted)) :-
+sub(Val) :-
     (   q(X)
     ->  X2 is X-Val
     ;   X2 is -Val
@@ -51,7 +57,7 @@ subtract(i(Val, substracted)) :-
     asserta(p(X2)),
     ignore(q(_)),
     random_sleep(1),
-    format("Subtractor: Added ~p~n", [p(X2)]).
+    format("Subtracted ~p~n", [p(X2)]).
 
 random_sleep(Max) :-
     Wait is random_float*Max,
